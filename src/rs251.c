@@ -9,8 +9,8 @@
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
  *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -21,11 +21,47 @@
  * SOFTWARE.
  */
 
-#include "rs251/rs251.h"
-
+#include <rs251/rs251.h>
 #include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
+
+/* Freestanding implementations of the memory primitives the core needs, so the
+   library depends on no C runtime. Byte-at-a-time is plenty: the codec only
+   ever moves small, fixed-size buffers. */
+
+static void *rs251_memcpy(void *dest, const void *src, size_t n) {
+  uint8_t *d = (uint8_t *)dest;
+  const uint8_t *s = (const uint8_t *)src;
+  for (size_t i = 0; i < n; i++) {
+    d[i] = s[i];
+  }
+  return dest;
+}
+
+static void *rs251_memmove(void *dest, const void *src, size_t n) {
+  uint8_t *d = (uint8_t *)dest;
+  const uint8_t *s = (const uint8_t *)src;
+  if (d < s) {
+    /* Non-overlapping or dest below src: copying front-to-back is safe. */
+    for (size_t i = 0; i < n; i++) {
+      d[i] = s[i];
+    }
+  } else if (d > s) {
+    /* dest above src and possibly overlapping: copy back-to-front so each
+       source byte is read before the copy reaches it. */
+    for (size_t i = n; i > 0; i--) {
+      d[i - 1] = s[i - 1];
+    }
+  }
+  return dest;
+}
+
+static void *rs251_memset(void *s, int c, size_t n) {
+  uint8_t *p = (uint8_t *)s;
+  for (size_t i = 0; i < n; i++) {
+    p[i] = (uint8_t)c;
+  }
+  return s;
+}
 
 /* ======================================================================
    GF(251) field arithmetic
@@ -164,7 +200,7 @@ static inline void poly_mul(rs251_poly *out, const rs251_poly *a,
     return;
   }
   out->len = (uint16_t)(a->len + b->len - 1);
-  memset(out->coeff, 0, out->len * sizeof(gf251_t));
+  rs251_memset(out->coeff, 0, out->len * sizeof(gf251_t));
   for (uint16_t i = 0; i < a->len; i++) {
     for (uint16_t j = 0; j < b->len; j++) {
       out->coeff[i + j] =
@@ -189,7 +225,7 @@ static inline int poly_divmod(rs251_poly *q, rs251_poly *r, const rs251_poly *a,
 
   rs251_poly quo;
   quo.len = deg_a >= deg_b ? (uint16_t)(deg_a - deg_b + 1) : 0;
-  memset(quo.coeff, 0, quo.len * sizeof(gf251_t));
+  rs251_memset(quo.coeff, 0, quo.len * sizeof(gf251_t));
 
   /* Long division: cancel the remainder's leading term with the matching
      multiple of b until its degree drops below deg(b). */
@@ -302,28 +338,17 @@ static inline void partial_eea(rs251_poly *g, rs251_poly *v,
 /* ======================================================================
    Public codec API
 
-   Full definition of the opaque rs251_codec. Caches the precomputed vanishing
-   polynomial g0(x) = prod_i (x - i) (degree-ascending coefficients in
+   The rs251_codec layout lives in the public header so callers can allocate
+   it themselves; init fills in the precomputed vanishing polynomial
+   g0(x) = prod_i (x - i) (degree-ascending coefficients in
    vanishing[0..vanishing_len-1]) used by the Gao decoder.
    ====================================================================== */
 
-struct rs251_codec {
-  uint16_t n;
-  uint16_t k;
-  gf251_t vanishing[RS251_MAX_N + 1];
-  uint16_t vanishing_len;
-};
-
 const char *rs251_version(void) { return RS251_VERSION; }
 
-rs251_codec *rs251_codec_create(uint16_t n, uint16_t k) {
-  if (n < 1 || n > RS251_MAX_N || k < 1 || k > n) {
-    return NULL;
-  }
-
-  rs251_codec *c = malloc(sizeof *c);
-  if (c == NULL) {
-    return NULL;
+rs251_status rs251_codec_init(rs251_codec *c, uint16_t n, uint16_t k) {
+  if (c == NULL || n < 1 || n > RS251_MAX_N || k < 1 || k > n) {
+    return RS251_ERR_PARAMS;
   }
   c->n = n;
   c->k = k;
@@ -337,12 +362,10 @@ rs251_codec *rs251_codec_create(uint16_t n, uint16_t k) {
   rs251_poly g0;
   poly_vanishing(&g0, points, n);
   c->vanishing_len = g0.len;
-  memcpy(c->vanishing, g0.coeff, g0.len * sizeof(gf251_t));
+  rs251_memcpy(c->vanishing, g0.coeff, g0.len * sizeof(gf251_t));
 
-  return c;
+  return RS251_OK;
 }
-
-void rs251_codec_free(rs251_codec *c) { free(c); }
 
 rs251_status rs251_encode(const rs251_codec *c, const gf251_t *msg,
                           gf251_t *code) {
@@ -356,7 +379,7 @@ rs251_status rs251_encode(const rs251_codec *c, const gf251_t *msg,
   }
 
   /* Systematic: the message symbols are the codeword's first k positions. */
-  memcpy(code, msg, c->k * sizeof(gf251_t));
+  rs251_memcpy(code, msg, c->k * sizeof(gf251_t));
 
   /* Parity: interpolate the message polynomial f (degree < k) through the
      points (i, msg[i]) and evaluate it at the parity positions k..n-1. */
@@ -402,7 +425,7 @@ rs251_status rs251_decode(const rs251_codec *c, const gf251_t *recv,
      (x - i). */
   rs251_poly g0;
   g0.len = c->vanishing_len;
-  memcpy(g0.coeff, c->vanishing, c->vanishing_len * sizeof(gf251_t));
+  rs251_memcpy(g0.coeff, c->vanishing, c->vanishing_len * sizeof(gf251_t));
   for (uint16_t i = 0; i < c->n; i++) {
     if (recv[i] >= RS251_PRIME) {
       rs251_poly factor, quotient;
@@ -517,8 +540,8 @@ rs251_status rs251_bytes_to_message(const rs251_codec *c, const uint8_t *bytes,
   /* Lay the len little-endian digits out as a zero-padded big-endian message
      of exactly k symbols. */
   reverse_digits(msg, len);
-  memmove(msg + (c->k - len), msg, len * sizeof(gf251_t));
-  memset(msg, 0, (c->k - len) * sizeof(gf251_t));
+  rs251_memmove(msg + (c->k - len), msg, len * sizeof(gf251_t));
+  rs251_memset(msg, 0, (c->k - len) * sizeof(gf251_t));
   return RS251_OK;
 }
 
@@ -529,7 +552,8 @@ rs251_status rs251_message_to_bytes(const rs251_codec *c, const gf251_t *msg,
   }
 
   size_t b = rs251_message_bytes(c);
-  size_t len = 0; /* bytes[0..len-1]: the value so far, little-endian base 256 */
+  size_t len =
+      0; /* bytes[0..len-1]: the value so far, little-endian base 256 */
   for (size_t i = 0; i < c->k; i++) {
     if (msg[i] >= RS251_PRIME) {
       return RS251_ERR_PARAMS; /* not a base-251 digit */
@@ -552,7 +576,7 @@ rs251_status rs251_message_to_bytes(const rs251_codec *c, const gf251_t *msg,
   /* Lay the len little-endian digits out as a zero-padded big-endian block of
      exactly B bytes. */
   reverse_digits(bytes, len);
-  memmove(bytes + (b - len), bytes, len);
-  memset(bytes, 0, b - len);
+  rs251_memmove(bytes + (b - len), bytes, len);
+  rs251_memset(bytes, 0, b - len);
   return RS251_OK;
 }

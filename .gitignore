@@ -1,5 +1,8 @@
 /build/
 
+# clangd index cache
+.cache/
+
 # Eclipse project files
 .project
 .cproject

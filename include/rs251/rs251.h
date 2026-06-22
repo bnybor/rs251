@@ -48,11 +48,23 @@ typedef enum {
   RS251_ERR_DECODE = -2, /* more than (n-k) erasures+2*errors: decode failed */
 } rs251_status;
 
-/* RS251 context */
-typedef struct rs251_codec rs251_codec;
+/* RS251 context. The fields are an implementation detail and must not be read
+   or written directly; the layout is exposed here only so callers can allocate
+   a codec themselves (on the stack, in static storage, wherever they choose).
+   Every codec has the same fixed size regardless of n and k. Initialize one
+   with rs251_codec_init before passing it to any other function. */
+typedef struct rs251_codec {
+  uint16_t n;
+  uint16_t k;
+  uint16_t vanishing_len;
+  gf251_t vanishing[RS251_MAX_N + 1];
+} rs251_codec;
 
-rs251_codec *rs251_codec_create(uint16_t n, uint16_t k);
-void rs251_codec_free(rs251_codec *c);
+/* Initializes a caller-allocated codec for an RS(n, k) code, requiring
+   1 <= k <= n <= RS251_MAX_N. Returns RS251_OK, or RS251_ERR_PARAMS on a NULL
+   pointer or out-of-range n/k. Acquires no resources: there is nothing to
+   free, and a codec may be re-initialized at any time. */
+rs251_status rs251_codec_init(rs251_codec *c, uint16_t n, uint16_t k);
 
 /* Systematic encoding: writes the n-symbol codeword for the k-symbol message
    into code. The first k codeword symbols equal msg; the remaining n-k are
